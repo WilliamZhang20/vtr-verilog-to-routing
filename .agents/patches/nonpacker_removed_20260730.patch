@@ -1,0 +1,134 @@
+diff --git a/.gitignore b/.gitignore
+index 5aec7c63d2..5aaa2a4325 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,7 +2,8 @@
+ #Executables and generated files
+ #
+ *.exe
+-
++.agents
++vtr_flow
+ #Install
+ bin/
+ 
+diff --git a/vpr/src/place/delay_model/PlacementDelayModelCreator.cpp b/vpr/src/place/delay_model/PlacementDelayModelCreator.cpp
+index 958df0ba82..5a3580df0c 100644
+--- a/vpr/src/place/delay_model/PlacementDelayModelCreator.cpp
++++ b/vpr/src/place/delay_model/PlacementDelayModelCreator.cpp
+@@ -7,10 +7,48 @@
+ #include "delta_delay_model.h"
+ #include "override_delay_model.h"
+ 
++#include <cstdlib>
++#include <filesystem>
++#include <string>
++
++#include "vtr_log.h"
+ #include "vtr_time.h"
+ #include "physical_types.h"
+ #include "place_and_route.h"
+ 
++namespace {
++
++/**
++ * @brief Optional on-disk place-delay cache (env VPR_PLACE_DELAY_CACHE=<path>).
++ *
++ * When set, and CLI read/write_placement_delay_lookup are empty:
++ *  - if <path> exists → read (skip compute)
++ *  - else → compute then write
++ *
++ * Pure reuse of the timing lookup used by GP/SA — does not change packer or
++ * SA schedules. Safe across nest/b2b arms that share arch+device+W.
++ */
++void apply_place_delay_cache_env(t_placer_opts& placer_opts) {
++    if (!placer_opts.read_placement_delay_lookup.empty()
++        || !placer_opts.write_placement_delay_lookup.empty()) {
++        return; // explicit CLI wins
++    }
++    const char* path = std::getenv("VPR_PLACE_DELAY_CACHE");
++    if (!path || path[0] == '\0') {
++        return;
++    }
++    namespace fs = std::filesystem;
++    if (fs::exists(path)) {
++        placer_opts.read_placement_delay_lookup = path;
++        VTR_LOG("VPR_PLACE_DELAY_CACHE: reading place-delay lookup from %s\n", path);
++    } else {
++        placer_opts.write_placement_delay_lookup = path;
++        VTR_LOG("VPR_PLACE_DELAY_CACHE: will write place-delay lookup to %s\n", path);
++    }
++}
++
++} // namespace
++
+ static int get_longest_segment_length(const std::vector<t_segment_inf>& segment_inf) {
+     int length = 0;
+ 
+@@ -33,6 +71,11 @@ PlacementDelayModelCreator::create_delay_model(const t_placer_opts& placer_opts,
+                                                const t_chan_width_dist& chan_width_dist,
+                                                const std::vector<t_direct_inf>& directs,
+                                                bool is_flat) {
++    // Non-const copy so env cache can set read/write paths without changing
++    // the caller's opts object permanently beyond this create call.
++    t_placer_opts opts = placer_opts;
++    apply_place_delay_cache_env(opts);
++
+     vtr::ScopedStartFinishTimer timer("Computing placement delta delay look-up");
+ 
+     t_chan_width chan_width = setup_chan_width(router_opts, chan_width_dist);
+@@ -62,24 +105,24 @@ PlacementDelayModelCreator::create_delay_model(const t_placer_opts& placer_opts,
+     // now setup and compute the actual arrays
+     std::unique_ptr<PlaceDelayModel> place_delay_model;
+ 
+-    if (placer_opts.delay_model_type == PlaceDelayModelType::SIMPLE) {
++    if (opts.delay_model_type == PlaceDelayModelType::SIMPLE) {
+         place_delay_model = std::make_unique<SimpleDelayModel>();
+-    } else if (placer_opts.delay_model_type == PlaceDelayModelType::DELTA) {
++    } else if (opts.delay_model_type == PlaceDelayModelType::DELTA) {
+         place_delay_model = std::make_unique<DeltaDelayModel>(is_flat);
+-    } else if (placer_opts.delay_model_type == PlaceDelayModelType::DELTA_OVERRIDE) {
++    } else if (opts.delay_model_type == PlaceDelayModelType::DELTA_OVERRIDE) {
+         place_delay_model = std::make_unique<OverrideDelayModel>(is_flat);
+     } else {
+         VTR_ASSERT_MSG(false, "Invalid placer delay model");
+     }
+ 
+-    if (placer_opts.read_placement_delay_lookup.empty()) {
+-        place_delay_model->compute(route_profiler, placer_opts, router_opts, longest_length);
++    if (opts.read_placement_delay_lookup.empty()) {
++        place_delay_model->compute(route_profiler, opts, router_opts, longest_length);
+     } else {
+-        place_delay_model->read(placer_opts.read_placement_delay_lookup);
++        place_delay_model->read(opts.read_placement_delay_lookup);
+     }
+ 
+-    if (!placer_opts.write_placement_delay_lookup.empty()) {
+-        place_delay_model->write(placer_opts.write_placement_delay_lookup);
++    if (!opts.write_placement_delay_lookup.empty()) {
++        place_delay_model->write(opts.write_placement_delay_lookup);
+     }
+ 
+     // free all data structures that are no longer needed
+diff --git a/vpr/vpr b/vpr/vpr
+index 247bfcdee8..271ddfc95d 120000
+--- a/vpr/vpr
++++ b/vpr/vpr
+@@ -1 +1 @@
+-../build/vpr/vpr
+\ No newline at end of file
++../.codex-runs/build_seed_envelope/vpr/vpr
+\ No newline at end of file
+diff --git a/vtr_flow/parse/qor_config/qor_ap_fixed_chan_width.txt b/vtr_flow/parse/qor_config/qor_ap_fixed_chan_width.txt
+index d516047a12..8fe1b6488d 100644
+--- a/vtr_flow/parse/qor_config/qor_ap_fixed_chan_width.txt
++++ b/vtr_flow/parse/qor_config/qor_ap_fixed_chan_width.txt
+@@ -23,7 +23,7 @@ post_fl_total_disp;vpr.out;\s*Total displacement of initial placement from flat
+ post_fl_avg_disp;vpr.out;\s*Average atom displacement of initial placement from flat placement: (.*)
+ post_fl_max_disp;vpr.out;\s*Max atom displacement of initial placement from flat placement: (.*)
+ ap_runtime;vpr.out;Analytical Placement took (.*) seconds
+-ap_gp_runtime;vpr.out;AP Global Placer took (.*) seconds
++ap_gp_runtime;vpr.out;(?:AP Nonlinear Nesterov Global Placer|AP Global Placer) took (.*) seconds
+ ap_fl_runtime;vpr.out;AP Full Legalizer took (.*) seconds
+ ap_dp_runtime;vpr.out;AP Detailed Placer took (.*) seconds
+ route_runtime;vpr.out;Routing took (.*) seconds

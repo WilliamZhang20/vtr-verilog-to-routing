@@ -1,0 +1,41 @@
+==================================================================
+EXACT-FIELD (deposition-consistent density gradient) vs base
+  exact           routed CPD     -0.60%  n=22  12w/10l
+  exact           post-DP CPD    -0.98%  n=22  8w/13l
+  exact           routed WL      -0.30%  n=22  11w/11l
+  exact_archfield routed CPD     -0.18%  n=22  11w/10l
+  exact_archfield post-DP CPD    +0.10%  n=22  11w/11l
+  exact_archfield routed WL      -0.01%  n=22  10w/10l
+  VERDICT: NULL. 12w/10l on routed CPD, inside the 3.7%-median seed noise.
+           Keep for correctness (gradient is now exact), not for QoR.
+==================================================================
+CONGESTION-AWARE PACKING -- gentle default (alpha=0.2, crit_th=0.8)
+  nesterov  W_min        -1.41%  n=15  unchanged=9
+  nesterov  routed CPD   -0.36%  n=15  unchanged=3
+  nesterov  #CLB         +0.47%  n=15  unchanged=6
+  b2b       W_min        -0.73%  n=15  unchanged=8
+  b2b       routed CPD   +1.82%  n=15  unchanged=3
+  b2b       #CLB         +0.51%  n=15  unchanged=6
+  VERDICT: under-engaged at this setting; cannot distinguish null from inert.
+==================================================================
+CONGESTION-AWARE PACKING -- STRONG setting (alpha=0.7, min_util=0.4, crit_th=0.95)
+  nesterov  W_min        -1.57%  n=6   moved=4 improved=4
+  nesterov  #CLB        +16.58%  n=6   moved=6 improved=0
+  nesterov  routed CPD   +1.09%  n=6   moved=6 improved=2
+  b2b       W_min        -1.35%  n=6   moved=2 improved=2
+  b2b       #CLB        +15.02%  n=6   moved=6 improved=0
+  b2b       routed CPD   -3.11%  n=6   moved=6 improved=3
+  VERDICT: NOT falsified. W_min moved 6/12, ALL improving, 0 regressions.
+           Mechanism has real authority; area cost +4..36% is the blocker.
+==================================================================
+BASE-ARM SEED NOISE (routed CPD spread, the floor any effect must clear)
+  attention_layer       n=3 spread   5.4%
+  bnn                   n=3 spread   1.7%
+  clstm_like.small      n=3 spread  12.6%
+  dla_like.small        n=3 spread   4.7%
+  dnnweaver             n=3 spread  14.8%
+  lenet                 n=3 spread   3.3%
+  softmax               n=3 spread   3.7%
+  spmv                  n=3 spread   3.3%
+  tpu_like.small.os     n=3 spread   0.2%
+  MEDIAN spread 3.7%   MAX 14.8%
