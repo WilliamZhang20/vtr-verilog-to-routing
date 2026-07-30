@@ -265,6 +265,18 @@ LegalizationClusterId GreedyClusterer::try_grow_cluster(PackMoleculeId seed_mol_
                                                                                        cluster_legalizer,
                                                                                        attraction_groups);
 
+    // Make this cluster's external pin utilization target depend on how
+    // congested its region of the die is. The cluster's flat position is only
+    // known once the gain stats have been created from the seed molecule.
+    // Inert unless APPack's congestion map is enabled.
+    if (appack_ctx_.congestion_map.is_valid()) {
+        float pin_util_scale = appack_ctx_.congestion_map.get_ext_pin_util_scale(
+            static_cast<int>(cluster_gain_stats.flat_cluster_position.x),
+            static_cast<int>(cluster_gain_stats.flat_cluster_position.y));
+        if (pin_util_scale != 1.0f)
+            cluster_legalizer.set_cluster_ext_pin_util_scale(legalization_cluster_id, pin_util_scale);
+    }
+
     // Select the first candidate molecule to try to add to this cluster.
     PackMoleculeId candidate_mol_id = candidate_selector.get_next_candidate_for_cluster(
         cluster_gain_stats,

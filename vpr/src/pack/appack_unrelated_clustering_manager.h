@@ -58,9 +58,10 @@ class APPackUnrelatedClusteringManager {
   public:
     /**
      * @brief When the packing is particularly difficult, and it has failed enough
-     *        times, APPack will perform high-effort unrelated clustering. This will
-     *        increase the search distance to the size of the device and increase
-     *        the number of attempts to the following amount.
+     *        times, APPack will perform high-effort unrelated clustering. This
+     *        increases the number of attempts to the following amount. The search
+     *        radius is set by the caller to the APPack max-allowed distance
+     *        (not full-device, except in LEGACY mode) so UC cannot wash GP.
      */
     static constexpr int high_effort_max_unrelated_clustering_attempts_ = 12;
 

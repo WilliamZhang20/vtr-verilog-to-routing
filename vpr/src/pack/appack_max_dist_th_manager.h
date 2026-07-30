@@ -7,6 +7,7 @@
  *          thresholding optimization used within APPack.
  */
 
+#include <algorithm>
 #include <string>
 #include <vector>
 #include "physical_types.h"
@@ -61,9 +62,12 @@ class APPackMaxDistThManager {
   public:
     // When packing fails, it may try to increase the max distance threshold to
     // resolve the failure. This scales the max distance threshold of the failing
-    // logical block type. Increasing this value will reduce the number of fallbacks
-    // but may yield worse quality. This is expected to be a number larger than 0.
-    static constexpr float max_dist_th_fail_increase_scale = 10.0f;
+    // logical block type. Historically this was 10x (often exploding to full-chip
+    // after one failure). Default is gentler; cap vs the *initial* auto threshold
+    // preserves flat-placement fidelity. Override both with
+    // VPR_APPACK_LEGACY_DIST_GROW=1 (scale 10, uncapped).
+    static constexpr float max_dist_th_fail_increase_scale_default_ = 2.0f;
+    static constexpr float max_dist_th_vs_initial_cap_default_ = 3.0f;
 
   public:
     APPackMaxDistThManager() = default;
@@ -120,6 +124,54 @@ class APPackMaxDistThManager {
         logical_block_dist_thresholds_[logical_block_ty.index] = new_threshold;
     }
 
+    /// @brief Initial (auto/user) threshold before pack-failure growth.
+    inline float get_initial_max_dist_threshold(const t_logical_block_type& logical_block_ty) const {
+        VTR_ASSERT_SAFE_MSG(is_initialized_,
+                            "APPackMaxDistThManager has not been initialized, cannot call this method");
+        VTR_ASSERT_SAFE_MSG((size_t)logical_block_ty.index < initial_logical_block_dist_thresholds_.size(),
+                            "Logical block type does not have an initial max distance threshold");
+        return initial_logical_block_dist_thresholds_[logical_block_ty.index];
+    }
+
+    /// @brief Upper bound for failure-driven growth of this type's threshold.
+    inline float get_max_allowed_dist_threshold(const t_logical_block_type& logical_block_ty) const {
+        const float initial = get_initial_max_dist_threshold(logical_block_ty);
+        const float vs_initial = initial * max_dist_th_vs_initial_cap_;
+        return std::min(max_distance_on_device_, vs_initial);
+    }
+
+    /// @brief True if failure-driven growth can still raise this type's threshold.
+    inline bool can_increase_max_dist_threshold(const t_logical_block_type& logical_block_ty) const {
+        return get_max_dist_threshold(logical_block_ty) + 1e-3f
+               < get_max_allowed_dist_threshold(logical_block_ty);
+    }
+
+    /**
+     * @brief Grow the max distance threshold after a pack failure, respecting the
+     *        per-type cap vs the initial threshold.
+     * @return true if the threshold was increased.
+     */
+    bool try_increase_max_dist_threshold(const t_logical_block_type& logical_block_ty);
+
+    float max_dist_th_fail_increase_scale() const { return max_dist_th_fail_increase_scale_; }
+
+    /// @brief True when VPR_APPACK_LEGACY_DIST_GROW=1 (uncapped grow + full-chip UC).
+    bool legacy_dist_grow() const { return legacy_dist_grow_; }
+
+    /**
+     * @brief Max unrelated-clustering search radius that still respects GP fidelity.
+     *
+     * Matches the pack-fail max-distance cap (or full device in legacy mode).
+     * High-effort unrelated clustering must not search farther than this —
+     * otherwise it bypasses the candidate-distance cap and washes GP.
+     */
+    inline float get_max_allowed_unrelated_tile_dist(const t_logical_block_type& logical_block_ty) const {
+        if (legacy_dist_grow_) {
+            return get_max_device_distance();
+        }
+        return get_max_allowed_dist_threshold(logical_block_ty);
+    }
+
   private:
     /**
      * @brief Helper method that initializes the thresholds of all logical
@@ -143,8 +195,15 @@ class APPackMaxDistThManager {
     ///        This is initialized in the constructor and accessed during packing.
     std::vector<float> logical_block_dist_thresholds_;
 
+    /// @brief Snapshot of thresholds after init (before pack-failure growth).
+    std::vector<float> initial_logical_block_dist_thresholds_;
+
     /// @brief This is the maximum manhattan distance possible on the device. This
     ///        is the distance of traveling from the bottom-left corner of the device
     ///        to the top right.
-    float max_distance_on_device_;
+    float max_distance_on_device_ = 0.f;
+
+    float max_dist_th_fail_increase_scale_ = max_dist_th_fail_increase_scale_default_;
+    float max_dist_th_vs_initial_cap_ = max_dist_th_vs_initial_cap_default_;
+    bool legacy_dist_grow_ = false;
 };

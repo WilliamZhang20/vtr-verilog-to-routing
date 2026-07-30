@@ -1196,6 +1196,15 @@ static float get_molecule_gain(PackMoleculeId molecule_id,
         }
         VTR_ASSERT_SAFE(gain_mult >= 0.0f && gain_mult <= 1.0f);
 
+        // Congestion-aware attenuation: in a congested, non-timing-critical
+        // region, make the cluster pickier about pulling in distant molecules.
+        // Unlike the distance attenuation above, this varies with position on
+        // the die. Inert unless APPack's congestion map is enabled.
+        if (appack_ctx.congestion_map.is_valid()) {
+            gain_mult *= appack_ctx.congestion_map.get_gain_attenuation(cluster_tile_loc.x,
+                                                                        cluster_tile_loc.y);
+        }
+
         // Update the gain.
         gain *= gain_mult;
 

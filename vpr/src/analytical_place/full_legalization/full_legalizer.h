@@ -352,13 +352,19 @@ class NaiveFullLegalizer : public FullLegalizer {
  * want to be placed. If this placement is then fed into a Simulated Annealing
  * based Detailed Placement step, this would enable it to converge on a better
  * answer faster.
+ *
+ * GP-preserving APPack defaults:
+ *  - Pack-fail growth capped vs initial threshold (scale 2, cap 3x)
+ *  - High-effort unrelated clustering search capped to that same budget
+ * If packing still cannot fit, soft-fail → FlatRecon.
+ * Restore historic uncapped growth: VPR_APPACK_LEGACY_DIST_GROW=1.
  */
 class APPack : public FullLegalizer {
   public:
     using FullLegalizer::FullLegalizer;
 
     /**
-     * @brief Run APPack.
+     * @brief Run APPack (with capped distance growth and FlatRecon fallback).
      *
      * This will call the Packer and Placer using the options provided by the
      * user for these stages in VPR.

@@ -7,6 +7,7 @@
  *          information used to configure APPack in the packer.
  */
 
+#include "appack_congestion_map.h"
 #include "appack_max_dist_th_manager.h"
 #include "appack_unrelated_clustering_manager.h"
 #include "device_grid.h"
@@ -15,6 +16,9 @@
 #include "vpr_context.h"
 #include "vpr_types.h"
 #include "vpr_utils.h"
+
+class AtomNetlist;
+class PreClusterTimingManager;
 
 /**
  * @brief Configuration options for APPack.
@@ -91,7 +95,9 @@ struct APPackContext : public Context {
     APPackContext(const FlatPlacementInfo& fplace_info,
                   const t_ap_opts& ap_opts,
                   const std::vector<t_logical_block_type> logical_block_types,
-                  const DeviceGrid& device_grid)
+                  const DeviceGrid& device_grid,
+                  const AtomNetlist& atom_netlist,
+                  const PreClusterTimingManager& pre_cluster_timing_manager)
         : appack_options(fplace_info, ap_opts)
         , flat_placement_info(fplace_info) {
 
@@ -105,6 +111,12 @@ struct APPackContext : public Context {
 
             unrelated_clustering_manager.init(ap_opts.appack_unrelated_clustering_args,
                                               logical_block_types);
+
+            // Inert unless VPR_APPACK_CONGESTION selects a mode.
+            congestion_map.init(fplace_info,
+                                atom_netlist,
+                                device_grid,
+                                pre_cluster_timing_manager);
         }
     }
 
@@ -126,4 +138,9 @@ struct APPackContext : public Context {
     // how far we should search for unrelated candidates and how many attempts
     // we should perform.
     APPackUnrelatedClusteringManager unrelated_clustering_manager;
+
+    // Per-tile congestion estimated from the flat placement. Unlike everything
+    // above, this varies with position on the die rather than with block type.
+    // Inert unless VPR_APPACK_CONGESTION selects a mode.
+    APPackCongestionMap congestion_map;
 };

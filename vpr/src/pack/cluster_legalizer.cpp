@@ -646,6 +646,30 @@ try_place_atom_block_rec(const t_pb_graph_node* pb_graph_node,
  * @brief Resets nets used at different pin classes for determining pin
  *        feasibility.
  */
+/**
+ * @brief Undo log for speculative lookahead pin marking.
+ *
+ * While set, every append to a lookahead pin class records the class and its size
+ * beforehand, so the appends made for one speculative primitive assignment can be
+ * rolled back exactly by truncating in reverse order. See try_pack_molecule for
+ * why only part of the marking needs to be redone per assignment.
+ */
+static std::vector<std::pair<std::vector<AtomNetId>*, size_t>>* g_lookahead_undo_log = nullptr;
+
+static inline void record_lookahead_append(std::vector<AtomNetId>& pin_class) {
+    if (g_lookahead_undo_log != nullptr) {
+        g_lookahead_undo_log->emplace_back(&pin_class, pin_class.size());
+    }
+}
+
+static void undo_lookahead_appends(std::vector<std::pair<std::vector<AtomNetId>*, size_t>>& log) {
+    // Reverse order, so repeated appends to the same class unwind correctly.
+    for (auto it = log.rbegin(); it != log.rend(); ++it) {
+        it->first->resize(it->second);
+    }
+    log.clear();
+}
+
 static void reset_lookahead_pins_used(t_pb* cur_pb) {
     const t_pb_type* pb_type = cur_pb->pb_graph_node->pb_type;
     if (cur_pb->pb_stats == nullptr) {
@@ -680,9 +704,17 @@ static void reset_lookahead_pins_used(t_pb* cur_pb) {
 static int net_sinks_reachable_in_cluster(const t_pb_graph_pin* driver_pb_gpin, const int depth, const AtomNetId net_id, const AtomPBBimap& atom_to_pb) {
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
 
+    /* This is one of the hottest routines in packing (tens of millions of calls on
+     * a mid-sized circuit), and it used to allocate a fresh hash set on every call.
+     * The set is purely scratch space, so it is kept across calls and cleared
+     * instead; clear() retains the bucket array, so the steady state is
+     * allocation-free. Contents and lookup semantics are unchanged. */
+    static thread_local std::unordered_set<const t_pb_graph_pin*> sink_pb_gpins;
+    sink_pb_gpins.clear();
+
     //Record the sink pb graph pins we are looking for
-    std::unordered_set<const t_pb_graph_pin*> sink_pb_gpins;
-    for (const AtomPinId pin_id : atom_ctx.netlist().net_sinks(net_id)) {
+    const auto net_sinks = atom_ctx.netlist().net_sinks(net_id);
+    for (const AtomPinId pin_id : net_sinks) {
         const t_pb_graph_pin* sink_pb_gpin = find_pb_graph_pin(atom_ctx.netlist(), atom_to_pb, pin_id);
         VTR_ASSERT(sink_pb_gpin);
 
@@ -690,13 +722,14 @@ static int net_sinks_reachable_in_cluster(const t_pb_graph_pin* driver_pb_gpin, 
     }
 
     //Count how many sink pins are reachable
+    const size_t num_net_sinks = net_sinks.size();
     size_t num_reachable_sinks = 0;
     for (int i_prim_pin = 0; i_prim_pin < driver_pb_gpin->num_connectable_primitive_input_pins[depth]; ++i_prim_pin) {
         const t_pb_graph_pin* reachable_pb_gpin = driver_pb_gpin->list_of_connectable_input_pin_ptrs[depth][i_prim_pin];
 
         if (sink_pb_gpins.count(reachable_pb_gpin)) {
             ++num_reachable_sinks;
-            if (num_reachable_sinks == atom_ctx.netlist().net_sinks(net_id).size()) {
+            if (num_reachable_sinks == num_net_sinks) {
                 return true;
             }
         }
@@ -800,6 +833,7 @@ static void compute_and_mark_lookahead_pins_used_for_pin(const t_pb_graph_pin* p
                 auto it = std::find(cur_pb->pb_stats->lookahead_input_pins_used[pin_class].begin(),
                                     cur_pb->pb_stats->lookahead_input_pins_used[pin_class].end(), net_id);
                 if (it == cur_pb->pb_stats->lookahead_input_pins_used[pin_class].end()) {
+                    record_lookahead_append(cur_pb->pb_stats->lookahead_input_pins_used[pin_class]);
                     cur_pb->pb_stats->lookahead_input_pins_used[pin_class].push_back(net_id);
                 }
             }
@@ -860,6 +894,7 @@ static void compute_and_mark_lookahead_pins_used_for_pin(const t_pb_graph_pin* p
 
             if (net_exits_cluster) {
                 /* This output must exit this cluster */
+                record_lookahead_append(cur_pb->pb_stats->lookahead_output_pins_used[pin_class]);
                 cur_pb->pb_stats->lookahead_output_pins_used[pin_class].push_back(net_id);
             }
         }
@@ -910,13 +945,19 @@ static void compute_and_mark_lookahead_pins_used(const AtomBlockId blk_id,
 static void try_update_lookahead_pins_used(const LegalizationCluster& cluster,
                                            const Prepacker& prepacker,
                                            const vtr::vector_map<AtomBlockId, LegalizationClusterId>& atom_cluster,
-                                           const AtomPBBimap& atom_to_pb) {
+                                           const AtomPBBimap& atom_to_pb,
+                                           const std::unordered_set<AtomBlockId>& filter_atoms,
+                                           bool mark_atoms_in_filter) {
     VTR_ASSERT(cluster.pb != nullptr);
 
     for (PackMoleculeId molecule_id : cluster.molecules) {
         const t_pack_molecule& molecule = prepacker.get_molecule(molecule_id);
         for (AtomBlockId blk_id : molecule.atom_block_ids) {
             if (!blk_id.is_valid()) {
+                continue;
+            }
+
+            if ((filter_atoms.count(blk_id) != 0) != mark_atoms_in_filter) {
                 continue;
             }
 
@@ -1306,6 +1347,41 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(PackMoleculeId molecule_
                                                                                                                                  primitives_list,
                                                                                                                                  prepacker_);
 
+    /* Lookahead pin marking is redone for every candidate primitive assignment
+     * tried below, and it re-marks every molecule already in the cluster, which
+     * dominates packing runtime. Most of that work is invariant across the
+     * assignments: a committed atom's marking depends on where the candidate's
+     * atoms sit only through the nets they share, so a committed atom sharing no
+     * net with the candidate marks identically every time. Mark those once (the
+     * "base"), and per assignment re-mark only the candidate and its in-cluster
+     * net neighbours on top, rolling those appends back afterwards. Marking is a
+     * set union and only the resulting class sizes are ever read, so base plus
+     * affected is exactly what a full re-mark would produce. */
+    static thread_local std::unordered_set<AtomBlockId> affected_atoms;
+    affected_atoms.clear();
+    if (enable_pin_feasibility_filter_) {
+        const AtomNetlist& netlist = atom_ctx.netlist();
+        for (AtomBlockId blk_id : molecule.atom_block_ids) {
+            if (!blk_id.is_valid())
+                continue;
+            affected_atoms.insert(blk_id);
+            for (AtomPinId pin_id : netlist.block_pins(blk_id)) {
+                const AtomNetId net_id = netlist.pin_net(pin_id);
+                if (!net_id.is_valid())
+                    continue;
+                for (AtomPinId net_pin_id : netlist.net_pins(net_id)) {
+                    const AtomBlockId neighbor_blk_id = netlist.pin_block(net_pin_id);
+                    if (neighbor_blk_id.is_valid() && atom_cluster_[neighbor_blk_id] == cluster_id)
+                        affected_atoms.insert(neighbor_blk_id);
+                }
+            }
+        }
+    }
+
+    static thread_local std::vector<std::pair<std::vector<AtomNetId>*, size_t>> lookahead_undo_log;
+    lookahead_undo_log.clear();
+    bool base_lookahead_marked = false;
+
     while (block_pack_status != e_block_pack_status::BLK_PASSED) {
         if (primitives_alive.empty()) {
             VTR_LOGV(log_verbosity_ > 3, "\t\tFAILED No candidate primitives available\n");
@@ -1354,12 +1430,35 @@ e_block_pack_status ClusterLegalizer::try_pack_molecule(PackMoleculeId molecule_
             if (enable_pin_feasibility_filter_) {
                 // try_update_lookahead_pins_used requires the candidate molecule to
                 // already be in cluster.molecules, which is satisfied by the push above.
-                reset_lookahead_pins_used(cluster.pb);
-                try_update_lookahead_pins_used(cluster, prepacker_, atom_cluster_, atom_pb_lookup());
+                if (!base_lookahead_marked) {
+                    reset_lookahead_pins_used(cluster.pb);
+                    try_update_lookahead_pins_used(cluster, prepacker_, atom_cluster_,
+                                                   atom_pb_lookup(), affected_atoms,
+                                                   /*mark_atoms_in_filter=*/false);
+                    base_lookahead_marked = true;
+                }
+
+                g_lookahead_undo_log = &lookahead_undo_log;
+                try_update_lookahead_pins_used(cluster, prepacker_, atom_cluster_,
+                                               atom_pb_lookup(), affected_atoms,
+                                               /*mark_atoms_in_filter=*/true);
+                g_lookahead_undo_log = nullptr;
+
                 if (!check_lookahead_pins_used(cluster.pb, max_external_pin_util)) {
+                    /* Roll the affected marking back now, while the pbs holding it are
+                     * still alive -- the failure handling below can free the ones that
+                     * were created for this candidate assignment. The base marking is
+                     * untouched and gets reused by the next assignment. */
+                    undo_lookahead_appends(lookahead_undo_log);
                     VTR_LOGV(log_verbosity_ > 4, "\t\t\tFAILED Pin Feasibility Filter\n");
                     block_pack_status = e_block_pack_status::BLK_FAILED_FEASIBLE;
                 } else {
+                    /* Keep the marking: it is the complete one this molecule commits
+                     * with if the remaining checks pass. It no longer separates base
+                     * from affected, so if a later check fails and another assignment
+                     * is tried, that one must rebuild the base from scratch. */
+                    lookahead_undo_log.clear();
+                    base_lookahead_marked = false;
                     VTR_LOGV(log_verbosity_ > 3, "\t\t\tPin Feasibility: Passed pin feasibility filter\n");
                 }
             }
@@ -1644,8 +1743,15 @@ e_block_pack_status ClusterLegalizer::add_mol_to_cluster(PackMoleculeId molecule
     LegalizationCluster& cluster = legalization_clusters_[cluster_id];
     VTR_ASSERT(!cluster.cluster_router.is_clean() && cluster.placement_stats != nullptr
                && "Cannot add molecule to cleaned cluster!");
-    // Set the target_external_pin_util.
+    // Set the target_external_pin_util. The type-level target may be scaled down
+    // for this particular cluster (see set_cluster_ext_pin_util_scale): APPack's
+    // congestion map uses this to pack less densely in congested,
+    // non-timing-critical regions, where pin demand is what binds.
     t_ext_pin_util target_ext_pin_util = target_external_pin_util_.get_pin_util(cluster.type->name);
+    if (cluster.ext_pin_util_scale != 1.0f) {
+        target_ext_pin_util.input_pin_util *= cluster.ext_pin_util_scale;
+        target_ext_pin_util.output_pin_util *= cluster.ext_pin_util_scale;
+    }
     // Try to pack the molecule into the cluster.
     e_block_pack_status pack_status = try_pack_molecule(molecule_id,
                                                         cluster,

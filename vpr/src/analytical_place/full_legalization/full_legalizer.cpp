@@ -9,6 +9,7 @@
 
 #include "full_legalizer.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <list>
 #include <memory>
@@ -1285,23 +1286,46 @@ void APPack::legalize(const PartialPlacement& p_placement) {
         }
     }
 
+    // Soft-fail FlatRecon disabled under historic uncapped APPack growth.
+    const bool legacy_dist_grow = (std::getenv("VPR_APPACK_LEGACY_DIST_GROW")
+                                   && std::getenv("VPR_APPACK_LEGACY_DIST_GROW")[0] == '1'
+                                   && std::getenv("VPR_APPACK_LEGACY_DIST_GROW")[1] == '\0');
+
     {
         // Run the Packer stage with the flat placement as a hint.
         // NOTE: We add a timer here to allow the task parser to find
         //       a "pack_time" equivalent for the AP flow. This is not
         //       a direct one-to-one comparison the pack_time for the
         //       non-AP flow, but it will be close.
+        //
+        // Soft-fail when capped max-distance / UC cannot fit: fall back to
+        // FlatRecon instead of full-chip pack retries that wash GP.
         vtr::ScopedStartFinishTimer timer("Packing");
-        try_pack(vpr_setup_.PackerOpts,
-                 vpr_setup_.AnalysisOpts,
-                 vpr_setup_.APOpts,
-                 arch_,
-                 vpr_setup_.PackerRRGraph,
-                 prepacker_,
-                 pre_cluster_timing_manager_,
-                 flat_placement_info,
-                 vpr_setup_,
-                 ram_mapper_);
+        const bool packed_ok = try_pack(vpr_setup_.PackerOpts,
+                                        vpr_setup_.AnalysisOpts,
+                                        vpr_setup_.APOpts,
+                                        arch_,
+                                        vpr_setup_.PackerRRGraph,
+                                        prepacker_,
+                                        pre_cluster_timing_manager_,
+                                        flat_placement_info,
+                                        vpr_setup_,
+                                        ram_mapper_,
+                                        /*soft_fail_on_device_fit=*/!legacy_dist_grow);
+        if (!packed_ok) {
+            VTR_LOG("APPack: falling back to FlatRecon full legalizer "
+                    "(capped max-distance could not fit the device).\n");
+            FlatRecon flat_recon(ap_netlist_,
+                                 atom_netlist_,
+                                 prepacker_,
+                                 pre_cluster_timing_manager_,
+                                 ram_mapper_,
+                                 vpr_setup_,
+                                 arch_,
+                                 device_grid_);
+            flat_recon.legalize(p_placement);
+            return;
+        }
     }
 
     // The Packer stores the clusters into a .net file. Load the packing file.

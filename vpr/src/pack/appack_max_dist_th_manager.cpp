@@ -6,6 +6,8 @@
  */
 
 #include "appack_max_dist_th_manager.h"
+#include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +20,15 @@
 #include "vpr_utils.h"
 #include "vtr_assert.h"
 #include "vtr_log.h"
+
+namespace {
+
+bool env_flag_is_one(const char* name) {
+    const char* env = std::getenv(name);
+    return env && env[0] == '1' && env[1] == '\0';
+}
+
+} // namespace
 
 void APPackMaxDistThManager::init(const std::vector<std::string>& max_dist_ths,
                                   const std::vector<t_logical_block_type>& logical_block_types,
@@ -36,6 +47,21 @@ void APPackMaxDistThManager::init(const std::vector<std::string>& max_dist_ths,
         set_max_distance_thresholds_from_strings(max_dist_ths, logical_block_types);
     }
 
+    // Snapshot initials before any pack-failure growth.
+    initial_logical_block_dist_thresholds_ = logical_block_dist_thresholds_;
+
+    // Optional legacy mode: old 10x uncapped growth + full-chip UC search.
+    legacy_dist_grow_ = env_flag_is_one("VPR_APPACK_LEGACY_DIST_GROW");
+    max_dist_th_fail_increase_scale_ = max_dist_th_fail_increase_scale_default_;
+    max_dist_th_vs_initial_cap_ = max_dist_th_vs_initial_cap_default_;
+    if (legacy_dist_grow_) {
+        max_dist_th_fail_increase_scale_ = 10.0f;
+        max_dist_th_vs_initial_cap_ = 1.0e9f;
+        VTR_LOG("APPack LEGACY max-distance growth enabled "
+                "(VPR_APPACK_LEGACY_DIST_GROW=1): scale=10, uncapped, "
+                "full-chip unrelated clustering.\n");
+    }
+
     // Set the initialized flag to true.
     is_initialized_ = true;
 
@@ -49,7 +75,28 @@ void APPackMaxDistThManager::init(const std::vector<std::string>& max_dist_ths,
                 lb_ty.name.c_str(),
                 get_max_dist_threshold(lb_ty));
     }
-    VTR_LOG("\n");
+    VTR_LOG("(fail grow scale=%g, cap=%gx initial%s)\n",
+            max_dist_th_fail_increase_scale_,
+            max_dist_th_vs_initial_cap_,
+            legacy_dist_grow_ ? ", LEGACY" : "");
+}
+
+bool APPackMaxDistThManager::try_increase_max_dist_threshold(const t_logical_block_type& logical_block_ty) {
+    VTR_ASSERT_SAFE(is_initialized_);
+    if (!can_increase_max_dist_threshold(logical_block_ty)) {
+        return false;
+    }
+
+    const float old_max_dist_th = get_max_dist_threshold(logical_block_ty);
+    // Note: The +1 is to account for the case when the max dist th is 0.
+    const float proposed = old_max_dist_th * max_dist_th_fail_increase_scale_ + 1.0f;
+    const float new_max_dist_th = std::min(proposed, get_max_allowed_dist_threshold(logical_block_ty));
+    if (new_max_dist_th <= old_max_dist_th + 1e-3f) {
+        return false;
+    }
+
+    set_max_dist_threshold(logical_block_ty, new_max_dist_th);
+    return true;
 }
 
 void APPackMaxDistThManager::auto_set_max_distance_thresholds(const std::vector<t_logical_block_type>& logical_block_types,

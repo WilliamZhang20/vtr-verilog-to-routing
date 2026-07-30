@@ -139,6 +139,16 @@ struct LegalizationCluster {
     ///        in the cluster (not fundamental but good for performance).
     PartitionRegion pr;
 
+    /// @brief Multiplier applied to this cluster's external pin utilization
+    ///        target, so the target can vary with where on the die the cluster
+    ///        is being built rather than only with its block type.
+    ///
+    /// 1.0 leaves the type's target untouched, which is the default and the
+    /// only value used unless APPack's congestion map is enabled. A value below
+    /// 1.0 closes the cluster earlier, leaving more and emptier clusters (and
+    /// so lower pin demand) in that region.
+    float ext_pin_util_scale = 1.0f;
+
     /// @brief The NoC group that this cluster is a part of. Is used to check if
     ///        a candidate primitive is in the same NoC group as the atom blocks
     ///        that have already been added to the primitive. This can be helpful
@@ -554,6 +564,25 @@ class ClusterLegalizer {
     ///        allows the user to modify the external pin utilization if needed.
     inline t_ext_pin_util_targets& get_target_external_pin_util() {
         return target_external_pin_util_;
+    }
+
+    /**
+     * @brief Scale one cluster's external pin utilization target.
+     *
+     * The type-level target from `t_ext_pin_util_targets` is spatially uniform.
+     * This lets a caller that knows where the cluster is being built (APPack,
+     * via its congestion map) make the target position-dependent. A scale of
+     * 1.0 is the unmodified type target.
+     *
+     *  @param cluster_id   The cluster to scale.
+     *  @param scale        Multiplier in (0, 1]; values above 1 are not allowed
+     *                      because the packer already has its own mechanism for
+     *                      loosening targets after a device-fit failure.
+     */
+    inline void set_cluster_ext_pin_util_scale(LegalizationClusterId cluster_id, float scale) {
+        VTR_ASSERT(cluster_id.is_valid() && (size_t)cluster_id < legalization_clusters_.size());
+        VTR_ASSERT(scale > 0.f && scale <= 1.f);
+        legalization_clusters_[cluster_id].ext_pin_util_scale = scale;
     }
 
     /*

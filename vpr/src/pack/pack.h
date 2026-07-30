@@ -45,6 +45,10 @@ using t_logical_block_type_ptr = const t_logical_block_type*;
  *              Pre-computed logical RAM groups with assigned physical types.
  *              Used to guide packing for memory clusters. Defaults to an empty
  *              mapper if not provided.
+ *  @param soft_fail_on_device_fit
+ *              Return false, with speculative clustering state discarded, when
+ *              APPack cannot fit after exhausting its legal retry states.
+ *              Otherwise preserve the traditional fatal-error behavior.
  */
 bool try_pack(const t_packer_opts& packer_opts,
               const t_analysis_opts& analysis_opts,
@@ -55,7 +59,8 @@ bool try_pack(const t_packer_opts& packer_opts,
               const PreClusterTimingManager& pre_cluster_timing_manager,
               const FlatPlacementInfo& flat_placement_info,
               const t_vpr_setup& vpr_setup,
-              const RamMapper& ram_mapper = RamMapper{});
+              const RamMapper& ram_mapper = RamMapper{},
+              bool soft_fail_on_device_fit = false);
 
 /**
  * @brief Try to fit the block type instances on the given architecture. Will

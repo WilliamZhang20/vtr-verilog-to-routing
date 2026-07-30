@@ -126,10 +126,8 @@ static e_packer_state get_next_packer_state(e_packer_state current_packer_state,
                 continue;
 
             // Check if we can increase the max distance threshold for any of the
-            // overused block types.
-            float max_distance_th = appack_ctx.max_distance_threshold_manager.get_max_dist_threshold(*p.first);
-            float max_device_distance = appack_ctx.max_distance_threshold_manager.get_max_device_distance();
-            if (max_distance_th < max_device_distance)
+            // overused block types (respecting the vs-initial growth cap).
+            if (appack_ctx.max_distance_threshold_manager.can_increase_max_dist_threshold(*p.first))
                 return e_packer_state::AP_INCREASE_MAX_DISPLACEMENT;
         }
     }
@@ -189,10 +187,8 @@ static e_packer_state get_next_packer_state(e_packer_state current_packer_state,
                 continue;
 
             // Check if we can increase the max distance threshold for any of the
-            // overused block types.
-            float max_distance_th = appack_ctx.max_distance_threshold_manager.get_max_dist_threshold(*p.first);
-            float max_device_distance = appack_ctx.max_distance_threshold_manager.get_max_device_distance();
-            if (max_distance_th < max_device_distance)
+            // overused block types (respecting the vs-initial growth cap).
+            if (appack_ctx.max_distance_threshold_manager.can_increase_max_dist_threshold(*p.first))
                 return e_packer_state::AP_INCREASE_MAX_DISPLACEMENT;
         }
     }
@@ -207,17 +203,19 @@ static e_packer_state get_next_packer_state(e_packer_state current_packer_state,
     }
 
     // APPack: Last resort is to increase the effort of the unrelated clustering.
-    //         This will have the worst affect on routability, so we only want
-    //         to try this if we have to.
+    //         Search radius is capped to the same GP-fidelity budget as candidate
+    //         max-distance (full device only in LEGACY mode) so UC cannot bypass
+    //         the distance cap and wash flat placement.
     if (appack_ctx.appack_options.use_appack) {
         for (const auto& p : block_type_utils) {
             if (p.second <= 1.0f)
                 continue;
 
             float max_unrelated_tile_distance = appack_ctx.unrelated_clustering_manager.get_max_unrelated_tile_dist(*p.first);
-            float max_device_distance = appack_ctx.max_distance_threshold_manager.get_max_device_distance();
+            float max_unrelated_tile_cap = appack_ctx.max_distance_threshold_manager.get_max_allowed_unrelated_tile_dist(*p.first);
             int max_unrelated_clustering_attempts = appack_ctx.unrelated_clustering_manager.get_max_unrelated_clustering_attempts(*p.first);
-            if (max_unrelated_tile_distance < max_device_distance || max_unrelated_clustering_attempts < appack_ctx.unrelated_clustering_manager.high_effort_max_unrelated_clustering_attempts_) {
+            if (max_unrelated_tile_distance + 1e-3f < max_unrelated_tile_cap
+                || max_unrelated_clustering_attempts < appack_ctx.unrelated_clustering_manager.high_effort_max_unrelated_clustering_attempts_) {
                 return e_packer_state::AP_USE_HIGH_EFFORT_UC;
             }
         }
@@ -237,7 +235,8 @@ bool try_pack(const t_packer_opts& packer_opts,
               const PreClusterTimingManager& pre_cluster_timing_manager,
               const FlatPlacementInfo& flat_placement_info,
               const t_vpr_setup& vpr_setup,
-              const RamMapper& ram_mapper) {
+              const RamMapper& ram_mapper,
+              bool soft_fail_on_device_fit) {
     const AtomContext& atom_ctx = g_vpr_ctx.atom();
     const DeviceContext& device_ctx = g_vpr_ctx.device();
     // The clusterer modifies the device context by increasing the size of the
@@ -332,7 +331,9 @@ bool try_pack(const t_packer_opts& packer_opts,
     APPackContext appack_ctx(flat_placement_info,
                              ap_opts,
                              device_ctx.logical_block_types,
-                             device_ctx.grid);
+                             device_ctx.grid,
+                             atom_ctx.netlist(),
+                             pre_cluster_timing_manager);
 
     // Initialize the greedy clusterer.
     GreedyClusterer clusterer(packer_opts,
@@ -485,16 +486,21 @@ bool try_pack(const t_packer_opts& packer_opts,
             }
             case e_packer_state::AP_USE_HIGH_EFFORT_UC: {
                 VTR_ASSERT(appack_ctx.appack_options.use_appack);
-                VTR_LOG("Packing failed to fit on device. Using high-effort unrelated clustering.\n");
+                VTR_LOG("Packing failed to fit on device. Using high-effort unrelated clustering "
+                        "(search capped to APPack max-allowed distance).\n");
                 VTR_LOG("Pack iteration is %d\n", pack_iteration);
                 for (const auto& p : block_type_utils) {
                     if (p.second <= 1.0f)
                         continue;
 
-                    float max_device_distance = appack_ctx.max_distance_threshold_manager.get_max_device_distance();
-                    appack_ctx.unrelated_clustering_manager.set_max_unrelated_tile_dist(*p.first, max_device_distance);
+                    // Cap UC search to the same fidelity budget as candidate
+                    // max-distance growth. Full-chip UC was washing GP even when
+                    // max_dist growth itself was capped.
+                    const float uc_cap = appack_ctx.max_distance_threshold_manager.get_max_allowed_unrelated_tile_dist(*p.first);
+                    appack_ctx.unrelated_clustering_manager.set_max_unrelated_tile_dist(*p.first, uc_cap);
                     appack_ctx.unrelated_clustering_manager.set_max_unrelated_clustering_attempts(*p.first,
                                                                                                   appack_ctx.unrelated_clustering_manager.high_effort_max_unrelated_clustering_attempts_);
+                    VTR_LOG("\t%s unrelated search radius -> %.3g\n", p.first->name.c_str(), uc_cap);
                 }
                 break;
             }
@@ -505,9 +511,7 @@ bool try_pack(const t_packer_opts& packer_opts,
                     if (p.second <= 1.0f)
                         continue;
 
-                    float max_device_distance = appack_ctx.max_distance_threshold_manager.get_max_device_distance();
-                    float max_distance_th = appack_ctx.max_distance_threshold_manager.get_max_dist_threshold(*p.first);
-                    if (max_distance_th < max_device_distance)
+                    if (appack_ctx.max_distance_threshold_manager.can_increase_max_dist_threshold(*p.first))
                         block_types_to_increase.push_back(p.first);
                 }
 
@@ -515,17 +519,14 @@ bool try_pack(const t_packer_opts& packer_opts,
                 for (size_t i = 0; i < block_types_to_increase.size(); i++) {
                     t_logical_block_type_ptr block_type_ptr = block_types_to_increase[i];
 
-                    // Increase the max distance threshold.
-                    // This allows it to increase the threshold slowly without going
-                    // all the way immediately.
-                    float old_max_dist_th = appack_ctx.max_distance_threshold_manager.get_max_dist_threshold(*block_type_ptr);
-                    // Note: The +1 is to account for the case when the max dist th is 0.
-                    float dist_th_scale = appack_ctx.max_distance_threshold_manager.max_dist_th_fail_increase_scale;
-                    float new_max_dist_th = old_max_dist_th * dist_th_scale + 1;
-                    appack_ctx.max_distance_threshold_manager.set_max_dist_threshold(*block_type_ptr,
-                                                                                     new_max_dist_th);
+                    // Cap growth vs the initial auto/user threshold so pack-fail
+                    // retries cannot explode to full-chip and wash GP fidelity.
+                    const float old_max_dist_th = appack_ctx.max_distance_threshold_manager.get_max_dist_threshold(*block_type_ptr);
+                    const bool grew = appack_ctx.max_distance_threshold_manager.try_increase_max_dist_threshold(*block_type_ptr);
+                    const float new_max_dist_th = appack_ctx.max_distance_threshold_manager.get_max_dist_threshold(*block_type_ptr);
+                    VTR_ASSERT(grew);
 
-                    VTR_LOG("%s", block_type_ptr->name.c_str());
+                    VTR_LOG("%s(%.3g->%.3g)", block_type_ptr->name.c_str(), old_max_dist_th, new_max_dist_th);
                     if (i < block_types_to_increase.size() - 1)
                         VTR_LOG(", ");
                 }
@@ -547,6 +548,21 @@ bool try_pack(const t_packer_opts& packer_opts,
                 VPR_FATAL_ERROR(VPR_ERROR_OTHER,
                                 "Failed to find pack clusters densely enough to fit in the designated floorplan regions.\n"
                                 "The floorplan regions may need to be expanded to run successfully. \n");
+            }
+
+            // Soft-fail path for APPack → FlatRecon fallback: capped max-distance
+            // growth exhausted without fitting. Caller must handle false return.
+            if (soft_fail_on_device_fit) {
+                VTR_LOG("APPack packing failed to fit on device with capped max-distance "
+                        "growth; soft-fail for FlatRecon fallback.\n");
+                g_vpr_ctx.mutable_floorplanning().cluster_constraints.clear();
+                cluster_legalizer.reset();
+                // APPack locks the global atom-to-PB mapping while its local
+                // ClusterLegalizer owns the speculative mapping. FlatRecon
+                // becomes the owner after this return, so release the lock only
+                // after all speculative clusters (and their PBs) are gone.
+                g_vpr_ctx.mutable_atom().mutable_lookup().set_atom_pb_bimap_lock(false);
+                return false;
             }
 
             //No suitable device found
