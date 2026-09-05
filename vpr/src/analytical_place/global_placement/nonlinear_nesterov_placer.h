@@ -326,7 +326,6 @@ class NonlinearNesterovPlacer : public GlobalPlacer {
     std::vector<APBlockId> moveable_blocks_;                       ///< Movable AP blocks touched by the optimizer.
     vtr::vector<APNetId, double> net_weights_;                     ///< Per-net weight applied to the weighted-average (WA) wirelength term computed in add_wirelength_gradient_.
     vtr::vector<APBlockId, double> block_precond_;                 ///< Per-block diagonal preconditioner (objective curvature estimate).
-    bool large_design_ = false;                                    ///< Design is at or above @ref kPreconditionSizeThreshold: applies the Jacobi preconditioner and the unit step.
     vtr::vector<APBlockId, float> pin_density_inflation_;          ///< Per-block density-term mass inflation from pin count (routability cell inflation); 1.0 for blocks at or below the reference pin count.
     std::unique_ptr<NetCohesion> cohesion_;                        ///< Periphery-pair net detection (gates pack-pattern affinity).
     std::unique_ptr<AffinitySpringTerm> affinity_term_;            ///< Affinity-spring objective term (groups + energy/gradient/curvature).

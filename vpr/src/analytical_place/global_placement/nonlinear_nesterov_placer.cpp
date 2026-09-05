@@ -102,20 +102,6 @@ constexpr double kMinConvergenceDisplacement = 1e-3;
  */
 constexpr double kBarzilaiBorweinGrowthCap = 2.0;
 
-/**
- * @brief Maximum fraction of the device span a block should move in one step.
- *
- * Initial step for designs that take the raw-gradient path. The raw gradient does
- * not carry position units, so the step must be scaled by the device span. The
- * Barzilai-Borwein secant adapts from this starting point.
- */
-constexpr double kInitialStepSpanFraction = 0.02;
-
-/**
- * @brief Movable-block count at or above which the preconditioner is applied.
- */
-constexpr size_t kPreconditionSizeThreshold = 30000;
-
 // --------------------------------------------------------------------------
 // Wirelength smoothing (gamma)
 // --------------------------------------------------------------------------
@@ -679,12 +665,6 @@ PartialPlacement NonlinearNesterovPlacer::place() {
     double convergence_displacement = std::max(kMinConvergenceDisplacement,
                                                device_span * kConvergenceDisplacementFraction);
 
-    // The preconditioner is always computed; this decides whether it is applied.
-    // Applying it and using a unit step are one regime, not two knobs: a
-    // preconditioned gradient carries position units so its natural step is ~1,
-    // while a raw gradient needs the span-scaled step.
-    large_design_ = moveable_blocks_.size() >= kPreconditionSizeThreshold;
-
     return run_global_optimization_(density_dimensions, device_span, convergence_displacement);
 }
 
@@ -923,11 +903,9 @@ PartialPlacement NonlinearNesterovPlacer::optimize_from_seed_(const PartialPlace
         PlacementGradient grad(ap_netlist_);
         FillerGradient filler_grad;
         // A preconditioned gradient carries position units (a near-Newton step),
-        // so its natural step length is ~1; the raw gradient instead needs a
-        // span-scaled step. The Barzilai-Borwein secant adapts from either.
-        double step_size = large_design_
-                               ? 1.0
-                               : std::max(0.1, device_span * kInitialStepSpanFraction);
+        // so its natural initial step length is one. The Barzilai-Borwein
+        // secant adapts it from there.
+        double step_size = 1.0;
         double nesterov_t = 1.0;
         // Objective-inert telemetry. Each accepted iteration costs one gradient
         // evaluation at the look-ahead point, and every gradient evaluation carries
@@ -994,7 +972,7 @@ PartialPlacement NonlinearNesterovPlacer::optimize_from_seed_(const PartialPlace
                 // moves in, and therefore the space the secant estimate must be
                 // taken in.
                 precond_grad.clear();
-                bool use_precond = large_design_ && !block_precond_.empty();
+                bool use_precond = !block_precond_.empty();
                 for (APBlockId blk_id : moveable_blocks_) {
                     double inv_precond = use_precond ? 1.0 / block_precond_[blk_id] : 1.0;
                     precond_grad.dx[blk_id] = grad.dx[blk_id] * inv_precond;
@@ -2161,7 +2139,7 @@ void NonlinearNesterovPlacer::gradient_step_(const PartialPlacement& y_placement
                                              PartialPlacement& next_placement,
                                              FillerState& next_fillers) const {
     next_placement = y_placement;
-    if (large_design_ && !block_precond_.empty()) {
+    if (!block_precond_.empty()) {
         // Preconditioned (near-Newton) step: divide each block's gradient by its
         // objective-curvature estimate so step direction is size-independent.
         for (APBlockId blk_id : moveable_blocks_) {
