@@ -672,6 +672,7 @@ static void setup_placer_opts(const t_options& Options, t_placer_opts* PlacerOpt
 
     PlacerOpts->place_algorithm = Options.place_algorithm;
     PlacerOpts->place_quench_algorithm = Options.place_quench_algorithm;
+    PlacerOpts->place_quench_slack_on_crit_only = Options.place_quench_slack_on_crit_only;
 
     PlacerOpts->constraints_file = Options.constraints_file;
 

@@ -1038,6 +1038,12 @@ If any of init_t, exit_t or alpha_t is specified, the user schedule, with a fixe
 
     **Default:**  ``criticality_timing``
 
+.. option:: --place_quench_slack_on_crit_only {on | off}
+
+    When ``--place_quench_algorithm slack_timing`` is selected, run the expensive per-move setup-slack timing analysis only for proposals that touch connections above ``--place_crit_limit``. Other quench moves keep the cheaper ``criticality_timing`` evaluation. Useful for recovering critical-path delay during quench without paying full-quench slack STA runtime.
+
+    **Default:**  ``off``
+
 .. option:: --place_frequency {once | always}
 
     Specifies how often placement is performed during the minimum channel width search.

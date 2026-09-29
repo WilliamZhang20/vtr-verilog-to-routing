@@ -1001,6 +1001,13 @@ struct t_placer_opts {
     /// Controls which placement algorithm is used during placement quench.
     t_place_algorithm place_quench_algorithm;
 
+    /**
+     * @brief When true and quench uses slack_timing, run per-move setup-slack STA
+     * only for proposals that touch connections above place_crit_limit; other
+     * quench moves keep the cheaper criticality_timing evaluation.
+     */
+    bool place_quench_slack_on_crit_only = false;
+
     /// Placement option annealing schedule
     t_annealing_sched anneal_sched;
 

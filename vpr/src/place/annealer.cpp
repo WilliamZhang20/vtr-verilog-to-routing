@@ -586,14 +586,25 @@ t_swap_result PlacementAnnealer::try_swap_(MoveGenerator& move_generator,
     } else {
         VTR_ASSERT(create_move_outcome == e_create_move::VALID);
 
+        // Resolve the evaluation algorithm for this proposal. Quench may request
+        // slack_timing globally, but --place_quench_slack_on_crit_only keeps the
+        // expensive per-move STA only for proposals that touch highly critical
+        // connections (reusing --place_crit_limit).
+        t_place_algorithm eval_algorithm = place_algorithm;
+        if (place_algorithm == e_place_algorithm::SLACK_TIMING_PLACE
+            && placer_opts_.place_quench_slack_on_crit_only
+            && !move_touches_highly_critical_connection_(blocks_affected_)) {
+            eval_algorithm = e_place_algorithm::CRITICALITY_TIMING_PLACE;
+        }
+
         // Apply the move to block_locs and compute the resulting cost deltas.
-        t_swap_cost_deltas deltas = swap_evaluator_.apply_and_evaluate(blocks_affected_, place_algorithm);
+        t_swap_cost_deltas deltas = swap_evaluator_.apply_and_evaluate(blocks_affected_, eval_algorithm);
         cost_terms_delta = deltas.cost_terms_delta;
         timing_delta_c = deltas.timing_delta_c;
         delta_c = deltas.delta_c;
         const bool update_interposer_costs = deltas.update_interposer_costs;
 
-        if (place_algorithm == e_place_algorithm::SLACK_TIMING_PLACE) {
+        if (eval_algorithm == e_place_algorithm::SLACK_TIMING_PLACE) {
             /* For setup slack analysis, we first do a timing analysis to get the newest
              * slack values resulted from the proposed block moves. If the move turns out
              * to be accepted, we keep the updated slack values and commit the block moves.
@@ -657,14 +668,14 @@ t_swap_result PlacementAnnealer::try_swap_(MoveGenerator& move_generator,
                 costs_.interposer_cost += cost_terms_delta.interposer_cost;
                 costs_.interposer_cong_cost += cost_terms_delta.interposer_cong_cost;
             }
-            if (place_algorithm == e_place_algorithm::CRITICALITY_TIMING_PLACE) {
+            if (eval_algorithm == e_place_algorithm::CRITICALITY_TIMING_PLACE) {
                 costs_.timing_cost += timing_delta_c;
 
                 /* Invalidates timing of modified connections for incremental
                  * timing updates. These invalidations are accumulated for a
                  * big timing update in the outer loop. */
                 pin_timing_invalidator_->invalidate_affected_connections(blocks_affected_);
-            } else if (place_algorithm == e_place_algorithm::SLACK_TIMING_PLACE) {
+            } else if (eval_algorithm == e_place_algorithm::SLACK_TIMING_PLACE) {
                 // Update the timing driven cost as usual
                 costs_.timing_cost += timing_delta_c;
 
@@ -677,7 +688,7 @@ t_swap_result PlacementAnnealer::try_swap_(MoveGenerator& move_generator,
             // only in CRITICALITY_TIMING_PLACE mode; SLACK_TIMING_PLACE already committed
             // them before its timing analysis.
             swap_evaluator_.commit(blocks_affected_, update_interposer_costs,
-                                   /*commit_td=*/place_algorithm == e_place_algorithm::CRITICALITY_TIMING_PLACE);
+                                   /*commit_td=*/eval_algorithm == e_place_algorithm::CRITICALITY_TIMING_PLACE);
 
             if (noc_opts_.noc) {
                 noc_cost_handler_->commit_noc_costs();
@@ -696,9 +707,9 @@ t_swap_result PlacementAnnealer::try_swap_(MoveGenerator& move_generator,
 
             // Restore block_locs and reset the scratch/proposed state.
             swap_evaluator_.revert(blocks_affected_,
-                                   /*revert_td=*/place_algorithm == e_place_algorithm::CRITICALITY_TIMING_PLACE);
+                                   /*revert_td=*/eval_algorithm == e_place_algorithm::CRITICALITY_TIMING_PLACE);
 
-            if (place_algorithm == e_place_algorithm::SLACK_TIMING_PLACE) {
+            if (eval_algorithm == e_place_algorithm::SLACK_TIMING_PLACE) {
                 /* Revert the timing delays and costs to pre-update values.
                  * These routines must be called after reverting the block moves.
                  */
@@ -847,6 +858,11 @@ void PlacementAnnealer::placement_inner_loop() {
     MoveGenerator& move_generator = select_move_generator(move_generator_1_, move_generator_2_, agent_state_,
                                                           placer_opts_, quench_started_);
 
+    // Quench may override the anneal cost model (documented --place_quench_algorithm).
+    const t_place_algorithm& active_algorithm = quench_started_
+                                                   ? placer_opts_.place_quench_algorithm
+                                                   : placer_opts_.place_algorithm;
+
     // Inner loop begins
     for (int inner_iter = 0, inner_crit_iter_count = 1; inner_iter < annealing_state_.move_lim; inner_iter++) {
 #ifndef NO_GRAPHICS
@@ -857,7 +873,7 @@ void PlacementAnnealer::placement_inner_loop() {
         }
 #endif /*NO_GRAPHICS*/
 
-        t_swap_result swap_result = try_swap_(move_generator, placer_opts_.place_algorithm, manual_move_enabled);
+        t_swap_result swap_result = try_swap_(move_generator, active_algorithm, manual_move_enabled);
 
         if (swap_result.move_result == e_move_result::ACCEPTED) {
             // Move was accepted.  Update statistics that are useful for the annealing schedule.
@@ -869,7 +885,7 @@ void PlacementAnnealer::placement_inner_loop() {
             swap_stats_.num_swap_rejected++;
         }
 
-        if (placer_opts_.place_algorithm.is_timing_driven()) {
+        if (active_algorithm.is_timing_driven()) {
             /* Do we want to re-timing analyze the circuit to get updated slack and criticality values?
              * We do this only once in a while, since it is expensive.
              */
@@ -969,6 +985,57 @@ void PlacementAnnealer::start_quench() {
 
     // Revert the move limit to initial value.
     annealing_state_.move_lim = annealing_state_.move_lim_max;
+
+    const char* quench_algo_name = "bounding_box";
+    if (placer_opts_.place_quench_algorithm == e_place_algorithm::CRITICALITY_TIMING_PLACE) {
+        quench_algo_name = "criticality_timing";
+    } else if (placer_opts_.place_quench_algorithm == e_place_algorithm::SLACK_TIMING_PLACE) {
+        quench_algo_name = "slack_timing";
+    }
+    const bool slack_on_crit_only = placer_opts_.place_quench_algorithm == e_place_algorithm::SLACK_TIMING_PLACE
+                                    && placer_opts_.place_quench_slack_on_crit_only;
+    VTR_LOG("Placement quench: algorithm=%s%s.\n",
+            quench_algo_name,
+            slack_on_crit_only
+                ? " (slack STA only on highly-critical moves)"
+                : "");
+}
+
+bool PlacementAnnealer::move_touches_highly_critical_connection_(
+    const t_pl_blocks_to_be_moved& blocks_affected) const {
+    if (!criticalities_) {
+        return false;
+    }
+
+    const auto& clb_nlist = g_vpr_ctx.clustering().clb_nlist;
+    const float crit_limit = placer_opts_.place_crit_limit;
+
+    for (const t_pl_moved_block& moved_block : blocks_affected.moved_blocks) {
+        for (ClusterPinId pin_id : clb_nlist.block_pins(moved_block.block_num)) {
+            ClusterNetId net_id = clb_nlist.pin_net(pin_id);
+            if (!net_id || clb_nlist.net_is_ignored(net_id)) {
+                continue;
+            }
+
+            int ipin = clb_nlist.pin_net_index(pin_id);
+            if (ipin > 0) {
+                // A moved sink directly changes this connection's delay.
+                if (criticalities_->criticality(net_id, ipin) > crit_limit) {
+                    return true;
+                }
+            } else {
+                // A moved driver changes every connection on its net, including
+                // critical sinks that reside on blocks not moved by this swap.
+                for (ClusterPinId sink_pin : clb_nlist.net_sinks(net_id)) {
+                    int sink_ipin = clb_nlist.pin_net_index(sink_pin);
+                    if (criticalities_->criticality(net_id, sink_ipin) > crit_limit) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 std::tuple<const t_swap_stats&, const MoveTypeStat&, const t_placer_statistics&> PlacementAnnealer::get_stats() const {

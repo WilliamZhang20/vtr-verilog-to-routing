@@ -2601,6 +2601,15 @@ argparse::ArgumentParser create_arg_parser(const std::string& prog_name, t_optio
         .choices({"bounding_box", "criticality_timing", "slack_timing"})
         .show_in(argparse::ShowIn::HELP_ONLY);
 
+    place_grp.add_argument<bool, ParseOnOff>(args.place_quench_slack_on_crit_only, "--place_quench_slack_on_crit_only")
+        .help(
+            "When --place_quench_algorithm is slack_timing, evaluate the expensive per-move "
+            "setup-slack timing analysis only for proposals that touch connections above "
+            "--place_crit_limit. Other quench moves use criticality_timing scoring instead. "
+            "Intended to recover CPD during quench without paying full-quench slack STA runtime.")
+        .default_value("off")
+        .show_in(argparse::ShowIn::HELP_ONLY);
+
     place_grp.add_argument(args.place_chan_width, "--place_chan_width")
         .help(
             "Sets the assumed channel width during placement. "

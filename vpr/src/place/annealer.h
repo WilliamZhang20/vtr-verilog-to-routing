@@ -268,6 +268,15 @@ class PlacementAnnealer {
                             bool manual_move_enabled);
 
     /**
+     * @brief True if the proposed move changes a connection above place_crit_limit.
+     *
+     * A moved driver affects every sink on its net, whereas a moved sink affects
+     * only its own connection. Used to gate expensive per-move setup-slack STA
+     * during quench when --place_quench_slack_on_crit_only is enabled.
+     */
+    bool move_touches_highly_critical_connection_(const t_pl_blocks_to_be_moved& blocks_affected) const;
+
+    /**
      * @brief Determines whether a move should be accepted or not.
      * Moves with negative delta cost are always accepted, but
      * moves that increase the total cost are accepted with a

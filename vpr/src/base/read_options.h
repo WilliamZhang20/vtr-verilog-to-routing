@@ -149,6 +149,7 @@ struct t_options {
     argparse::ArgValue<e_sched_type> anneal_sched_type;
     argparse::ArgValue<e_place_algorithm> place_algorithm;
     argparse::ArgValue<e_place_algorithm> place_quench_algorithm;
+    argparse::ArgValue<bool> place_quench_slack_on_crit_only;
     argparse::ArgValue<e_pad_loc_type> pad_loc_type;
     argparse::ArgValue<int> place_chan_width;
     argparse::ArgValue<float> place_rlim_escape_fraction;
